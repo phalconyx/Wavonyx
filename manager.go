@@ -36,6 +36,8 @@ type SessionAPI interface {
 	Delete(ctx context.Context, id string) error
 	Send(ctx context.Context, id string, req SendRequest) (*SendResult, error)
 	SendMedia(ctx context.Context, id string, req MediaSendRequest) (*SendResult, error)
+	EditMessage(ctx context.Context, id, to, messageID, newText string) (*SendResult, error)
+	RevokeMessage(ctx context.Context, id, to, messageID string) (*SendResult, error)
 	Recent(ctx context.Context, id string, limit int) ([]InboundMessage, error)
 	DownloadMedia(ctx context.Context, id, token string) (*MediaContent, error)
 }
@@ -335,6 +337,22 @@ func (m *Manager) SendMedia(ctx context.Context, id string, req MediaSendRequest
 		return nil, err
 	}
 	return s.sendMedia(ctx, req)
+}
+
+func (m *Manager) EditMessage(ctx context.Context, id, to, messageID, newText string) (*SendResult, error) {
+	s, err := m.session(id)
+	if err != nil {
+		return nil, err
+	}
+	return s.editMessage(ctx, to, messageID, newText)
+}
+
+func (m *Manager) RevokeMessage(ctx context.Context, id, to, messageID string) (*SendResult, error) {
+	s, err := m.session(id)
+	if err != nil {
+		return nil, err
+	}
+	return s.revokeMessage(ctx, to, messageID)
 }
 
 func (m *Manager) Recent(ctx context.Context, id string, limit int) ([]InboundMessage, error) {

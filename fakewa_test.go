@@ -213,6 +213,28 @@ func (c *fakeClient) SendMedia(ctx context.Context, jid string, m outboundMedia)
 	return res, nil
 }
 
+func (c *fakeClient) EditText(ctx context.Context, jid, messageID, newText string) (waSendResult, error) {
+	c.mu.Lock()
+	c.calls = append(c.calls, "edit:"+messageID)
+	err, res := c.sendErr, c.sendResult
+	c.mu.Unlock()
+	if err != nil {
+		return waSendResult{}, err
+	}
+	return res, nil
+}
+
+func (c *fakeClient) RevokeMessage(ctx context.Context, jid, messageID string) (waSendResult, error) {
+	c.mu.Lock()
+	c.calls = append(c.calls, "revoke:"+messageID)
+	err, res := c.sendErr, c.sendResult
+	c.mu.Unlock()
+	if err != nil {
+		return waSendResult{}, err
+	}
+	return res, nil
+}
+
 func (c *fakeClient) SendAvailable(ctx context.Context) error {
 	c.mu.Lock()
 	c.calls = append(c.calls, "available")

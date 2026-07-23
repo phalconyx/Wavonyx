@@ -102,6 +102,18 @@ curl -s "${H[@]}" -X POST localhost:9900/sessions/personal/messages \
 The kind (image/video/audio/document) is detected from the file's MIME type;
 files above `WAVONYX_MAX_MEDIA_BYTES` (default 64 MB) are rejected.
 
+**Edit or delete** a message you already sent — use the `message_id` from the
+send response and the same `to`:
+
+```sh
+# edit the text
+curl -s "${H[@]}" -X POST localhost:9900/sessions/personal/messages/<message_id>/edit \
+  -d '{"to":"6281234567890","text":"corrected text"}'
+
+# delete for everyone
+curl -s "${H[@]}" -X DELETE "localhost:9900/sessions/personal/messages/<message_id>?to=6281234567890"
+```
+
 ## Receiving messages
 
 Set `WAVONYX_WEBHOOK_URL` (and optionally a per‑session `webhook_url` on create).
@@ -188,6 +200,8 @@ curl -s "${H[@]}" "localhost:9900/sessions/personal/messages?limit=20"
 | `POST /sessions/{id}/messages` | Send text (JSON `{"to","text","typing"?}`) or media (multipart: `to`, `caption`, `typing`, `file`). |
 | `GET /sessions/{id}/messages?limit=50` | Recent inbound messages, newest first. |
 | `GET /sessions/{id}/media?token=…` | Download an inbound attachment (streams raw bytes). |
+| `POST /sessions/{id}/messages/{message_id}/edit` | Edit a message you sent. Body: `{"to","text"}`. |
+| `DELETE /sessions/{id}/messages/{message_id}` | Delete a message you sent, for everyone (`?to=` or body `{"to"}`). |
 
 Every response uses the envelope `{"data": ...}` or
 `{"error": {"code", "message"}}` with `{"meta": {"request_id"}}`; the HTTP status

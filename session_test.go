@@ -410,6 +410,63 @@ func TestRevokeEvent(t *testing.T) {
 	}
 }
 
+func TestEditMessageSend(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	store.script = pairScript("C")
+	store.pairJID = "628000@s.whatsapp.net"
+	m, _ := newTestManager(t, store, Config{})
+	create(t, m, "personal")
+	if _, err := m.Login(ctx, "personal"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	waitStatus(t, m, "personal", StatusConnected, 2*time.Second)
+
+	fc := store.client()
+	fc.resetCalls()
+	res, err := m.EditMessage(ctx, "personal", "628999888777", "MID1", "corrected")
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if res.To != "628999888777@s.whatsapp.net" || res.MessageID != "FAKEID" {
+		t.Fatalf("result: %+v", res)
+	}
+	if got := fc.actions(); !equalStr(got, []string{"edit:MID1"}) {
+		t.Fatalf("calls: %v", got)
+	}
+	if _, err := m.EditMessage(ctx, "personal", "628999888777", "MID1", "   "); !errors.Is(err, ErrEmptyText) {
+		t.Fatalf("empty edit: %v", err)
+	}
+}
+
+func TestRevokeMessageSend(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	store.script = pairScript("C")
+	store.pairJID = "628000@s.whatsapp.net"
+	m, _ := newTestManager(t, store, Config{})
+	create(t, m, "personal")
+	if _, err := m.Login(ctx, "personal"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	waitStatus(t, m, "personal", StatusConnected, 2*time.Second)
+
+	fc := store.client()
+	fc.resetCalls()
+	if _, err := m.RevokeMessage(ctx, "personal", "628999888777", "MID2"); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if got := fc.actions(); !equalStr(got, []string{"revoke:MID2"}) {
+		t.Fatalf("calls: %v", got)
+	}
+
+	m2, _ := newTestManager(t, newFakeStore(), Config{})
+	create(t, m2, "x")
+	if _, err := m2.RevokeMessage(ctx, "x", "628999888777", "MID"); !errors.Is(err, ErrNotConnected) {
+		t.Fatalf("revoke not connected: %v", err)
+	}
+}
+
 func TestLoggedOutEvent(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeStore()

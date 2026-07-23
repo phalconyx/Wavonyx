@@ -77,6 +77,8 @@ func New(api wavonyx.SessionAPI, cfg Config) http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/messages", h.sendMessage)
 	mux.HandleFunc("GET /sessions/{id}/messages", h.recentMessages)
 	mux.HandleFunc("GET /sessions/{id}/media", h.downloadMedia)
+	mux.HandleFunc("POST /sessions/{id}/messages/{message_id}/edit", h.editMessage)
+	mux.HandleFunc("DELETE /sessions/{id}/messages/{message_id}", h.revokeMessage)
 	mux.HandleFunc("/", h.notFound)
 	return mux
 }
@@ -341,6 +343,51 @@ func (h *handler) downloadMedia(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-Id", requestID(r))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(content.Data)
+}
+
+// editMessage edits a message previously sent by this session. Body:
+// {"to": "<chat>", "text": "<new text>"}; the message id is in the path.
+func (h *handler) editMessage(w http.ResponseWriter, r *http.Request) {
+	if !h.auth(w, r) {
+		return
+	}
+	var body struct {
+		To   string `json:"to"`
+		Text string `json:"text"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	res, err := h.api.EditMessage(r.Context(), r.PathValue("id"), body.To, r.PathValue("message_id"), body.Text)
+	if err != nil {
+		writeAPIError(w, r, err)
+		return
+	}
+	writeData(w, r, http.StatusOK, res)
+}
+
+// revokeMessage deletes (for everyone) a message previously sent by this
+// session. The chat is taken from ?to= or a JSON body {"to": "<chat>"}.
+func (h *handler) revokeMessage(w http.ResponseWriter, r *http.Request) {
+	if !h.auth(w, r) {
+		return
+	}
+	to := r.URL.Query().Get("to")
+	if to == "" {
+		var body struct {
+			To string `json:"to"`
+		}
+		if !decodeJSON(w, r, &body) {
+			return
+		}
+		to = body.To
+	}
+	res, err := h.api.RevokeMessage(r.Context(), r.PathValue("id"), to, r.PathValue("message_id"))
+	if err != nil {
+		writeAPIError(w, r, err)
+		return
+	}
+	writeData(w, r, http.StatusOK, res)
 }
 
 func (h *handler) notFound(w http.ResponseWriter, r *http.Request) {

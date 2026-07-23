@@ -540,6 +540,59 @@ func (s *session) downloadMedia(ctx context.Context, token string) (*MediaConten
 	return &MediaContent{Data: data, Mimetype: ref.Mimetype, Filename: ref.Filename}, nil
 }
 
+// editMessage replaces the text of a message we previously sent to `to`.
+func (s *session) editMessage(ctx context.Context, to, messageID, newText string) (*SendResult, error) {
+	if strings.TrimSpace(newText) == "" {
+		return nil, ErrEmptyText
+	}
+	toJID, err := NormalizeRecipient(to)
+	if err != nil {
+		return nil, err
+	}
+	client, err := s.connectedClient()
+	if err != nil {
+		return nil, err
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	res, err := client.EditText(sendCtx, toJID, messageID, newText)
+	if err != nil {
+		return nil, &SendError{To: toJID, Err: err}
+	}
+	return &SendResult{MessageID: res.ID, To: toJID, Timestamp: res.Timestamp}, nil
+}
+
+// revokeMessage deletes (for everyone) a message we previously sent to `to`.
+func (s *session) revokeMessage(ctx context.Context, to, messageID string) (*SendResult, error) {
+	toJID, err := NormalizeRecipient(to)
+	if err != nil {
+		return nil, err
+	}
+	client, err := s.connectedClient()
+	if err != nil {
+		return nil, err
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	res, err := client.RevokeMessage(sendCtx, toJID, messageID)
+	if err != nil {
+		return nil, &SendError{To: toJID, Err: err}
+	}
+	return &SendResult{MessageID: res.ID, To: toJID, Timestamp: res.Timestamp}, nil
+}
+
+// connectedClient returns the session's client if it is connected.
+func (s *session) connectedClient() (waClient, error) {
+	s.mu.Lock()
+	client := s.client
+	connected := s.status == StatusConnected
+	s.mu.Unlock()
+	if !connected || client == nil {
+		return nil, ErrNotConnected
+	}
+	return client, nil
+}
+
 func (s *session) runWorker() {
 	defer s.workerWG.Done()
 	for {

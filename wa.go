@@ -71,6 +71,8 @@ type waClient interface {
 	PushName() string // "" until known
 	SendText(ctx context.Context, jid, text string) (waSendResult, error)
 	SendMedia(ctx context.Context, jid string, m outboundMedia) (waSendResult, error)
+	EditText(ctx context.Context, jid, messageID, newText string) (waSendResult, error)
+	RevokeMessage(ctx context.Context, jid, messageID string) (waSendResult, error)
 	SendAvailable(ctx context.Context) error                     // presence "available"
 	SetComposing(ctx context.Context, jid string, on bool) error // typing indicator
 	// MarkRead sends a read receipt (blue ticks) for the given inbound message
@@ -315,6 +317,31 @@ func strOrNil(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func (c *realClient) EditText(ctx context.Context, jid, messageID, newText string) (waSendResult, error) {
+	j, err := types.ParseJID(jid)
+	if err != nil {
+		return waSendResult{}, err
+	}
+	edited := c.cli.BuildEdit(j, messageID, &waE2E.Message{Conversation: proto.String(newText)})
+	resp, err := c.cli.SendMessage(ctx, j, edited)
+	if err != nil {
+		return waSendResult{}, err
+	}
+	return waSendResult{ID: resp.ID, Timestamp: resp.Timestamp}, nil
+}
+
+func (c *realClient) RevokeMessage(ctx context.Context, jid, messageID string) (waSendResult, error) {
+	j, err := types.ParseJID(jid)
+	if err != nil {
+		return waSendResult{}, err
+	}
+	resp, err := c.cli.SendMessage(ctx, j, c.cli.BuildRevoke(j, types.EmptyJID, messageID))
+	if err != nil {
+		return waSendResult{}, err
+	}
+	return waSendResult{ID: resp.ID, Timestamp: resp.Timestamp}, nil
 }
 
 func (c *realClient) SendAvailable(ctx context.Context) error {

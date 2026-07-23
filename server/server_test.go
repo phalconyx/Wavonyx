@@ -39,6 +39,11 @@ type fakeAPI struct {
 	lastSendID     string
 	lastSendReq    wavonyx.SendRequest
 	lastMediaReq   wavonyx.MediaSendRequest
+	lastEditID     string
+	lastEditTo     string
+	lastEditText   string
+	lastRevokeID   string
+	lastRevokeTo   string
 }
 
 var _ wavonyx.SessionAPI = (*fakeAPI)(nil)
@@ -80,6 +85,20 @@ func (f *fakeAPI) Send(ctx context.Context, id string, req wavonyx.SendRequest) 
 }
 func (f *fakeAPI) SendMedia(ctx context.Context, id string, req wavonyx.MediaSendRequest) (*wavonyx.SendResult, error) {
 	f.lastSendID, f.lastMediaReq = id, req
+	if f.sendErr != nil {
+		return nil, f.sendErr
+	}
+	return f.result, nil
+}
+func (f *fakeAPI) EditMessage(ctx context.Context, id, to, messageID, newText string) (*wavonyx.SendResult, error) {
+	f.lastSendID, f.lastEditTo, f.lastEditID, f.lastEditText = id, to, messageID, newText
+	if f.sendErr != nil {
+		return nil, f.sendErr
+	}
+	return f.result, nil
+}
+func (f *fakeAPI) RevokeMessage(ctx context.Context, id, to, messageID string) (*wavonyx.SendResult, error) {
+	f.lastSendID, f.lastRevokeTo, f.lastRevokeID = id, to, messageID
 	if f.sendErr != nil {
 		return nil, f.sendErr
 	}
@@ -357,5 +376,42 @@ func TestSendMediaMissingFile(t *testing.T) {
 	_ = json.NewDecoder(res.Body).Decode(&env)
 	if res.StatusCode != http.StatusBadRequest || errCode(t, env) != "missing_file" {
 		t.Fatalf("status=%d env=%v", res.StatusCode, env)
+	}
+}
+
+func TestEditMessageEndpoint(t *testing.T) {
+	f := &fakeAPI{result: &wavonyx.SendResult{MessageID: "E1", To: "628@s.whatsapp.net"}}
+	h := New(f, Config{})
+	res, env := do(t, h, "POST", "/sessions/personal/messages/MID1/edit", "", `{"to":"628123","text":"fixed"}`)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d env=%v", res.StatusCode, env)
+	}
+	if f.lastSendID != "personal" || f.lastEditID != "MID1" || f.lastEditTo != "628123" || f.lastEditText != "fixed" {
+		t.Fatalf("edit args: id=%q msgid=%q to=%q text=%q", f.lastSendID, f.lastEditID, f.lastEditTo, f.lastEditText)
+	}
+	if dataObj(t, env)["message_id"] != "E1" {
+		t.Fatalf("data: %v", env)
+	}
+}
+
+func TestRevokeMessageEndpoint(t *testing.T) {
+	f := &fakeAPI{result: &wavonyx.SendResult{MessageID: "R1"}}
+	h := New(f, Config{})
+
+	// chat via query parameter
+	if res, _ := do(t, h, "DELETE", "/sessions/personal/messages/MID2?to=628123", "", ""); res.StatusCode != http.StatusOK {
+		t.Fatalf("query: status=%d", res.StatusCode)
+	}
+	if f.lastRevokeID != "MID2" || f.lastRevokeTo != "628123" {
+		t.Fatalf("revoke (query) args: msgid=%q to=%q", f.lastRevokeID, f.lastRevokeTo)
+	}
+
+	// chat via JSON body
+	f.lastRevokeID, f.lastRevokeTo = "", ""
+	if res, _ := do(t, h, "DELETE", "/sessions/personal/messages/MID3", "", `{"to":"628999"}`); res.StatusCode != http.StatusOK {
+		t.Fatalf("body: status=%d", res.StatusCode)
+	}
+	if f.lastRevokeID != "MID3" || f.lastRevokeTo != "628999" {
+		t.Fatalf("revoke (body) args: msgid=%q to=%q", f.lastRevokeID, f.lastRevokeTo)
 	}
 }
