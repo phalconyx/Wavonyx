@@ -19,8 +19,8 @@ with simulated typing to look less like a bot.
 
 - **Multi‑session** — one instance manages many WhatsApp numbers, addressed as `/sessions/{id}`.
 - **QR login** — the pairing code string is returned in the API response for your client to render; a rotating‑code endpoint keeps pairing alive.
-- **Send text** with **simulated typing** — `off`, fixed `constant`, or humanlike `natural` delay, configurable globally and per request; sends are serialized per session with a minimum gap.
-- **Receive** — inbound messages are parsed (sender, chat, group/DM, push name, text/caption, quoted) and delivered via **HMAC‑signed webhooks** with retries, plus kept in an in‑memory **ring buffer** for debugging.
+- **Send** text or media (image/video/audio/document) with **simulated typing** — `off`, fixed `constant`, or humanlike `natural` delay, configurable globally and per request; sends are serialized per session with a minimum gap.
+- **Receive** — inbound messages (text and media) are parsed (sender, chat, group/DM, push name, caption, quoted) and delivered via **HMAC‑signed webhooks** with retries, plus kept in an in‑memory **ring buffer**; media bytes are fetched on demand with a token.
 - **Lightweight & static** — pure Go, `CGO_ENABLED=0`, runs on a distroless image; WhatsApp credentials persist in a local SQLite file (pure‑Go [modernc](https://pkg.go.dev/modernc.org/sqlite) driver).
 
 ## How it works
@@ -91,6 +91,17 @@ curl -s "${H[@]}" -X POST localhost:9900/sessions/personal/messages \
 explicit JID (`...@s.whatsapp.net`, `...@g.us`). Local formats with a leading `0`
 are rejected — include the country code.
 
+Send **media** as `multipart/form-data` — the `file` part is the attachment;
+`caption`, `typing`, and `to` are form fields:
+
+```sh
+curl -s "${H[@]}" -X POST localhost:9900/sessions/personal/messages \
+  -F "to=6281234567890" -F "caption=here you go" -F "file=@invoice.pdf"
+```
+
+The kind (image/video/audio/document) is detected from the file's MIME type;
+files above `WAVONYX_MAX_MEDIA_BYTES` (default 64 MB) are rejected.
+
 ## Receiving messages
 
 Set `WAVONYX_WEBHOOK_URL` (and optionally a per‑session `webhook_url` on create).
@@ -133,6 +144,27 @@ When Wavonyx replies to a chat it first marks that chat's messages as read
 automatic. For it to be visible, the account's **Read Receipts** privacy setting
 (WhatsApp > Settings > Privacy) must be on.
 
+**Media messages.** When `kind` is `image`, `video`, `audio`, `voice`,
+`document`, or `sticker`, the payload carries a `media` object (mimetype, size,
+dimensions/duration, filename) with an opaque `token`. Any caption is in `text`.
+Download the bytes on demand:
+
+```sh
+curl -s "${H[@]}" "localhost:9900/sessions/personal/media?token=<token>" -o out.jpg
+```
+
+The token is self-contained (no server-side state) but tied to WhatsApp's media
+CDN, whose paths expire after a while — download reasonably promptly.
+
+**Edits and deletes.** Switch on the webhook `event` field to keep a stored copy
+in sync:
+
+- `message` — a new message.
+- `message.edit` — a message's content changed. The payload holds the new
+  content plus `edited_id`, the id of the message being edited.
+- `message.revoke` — a message was deleted for everyone; the payload's
+  `message_id` is the deleted message.
+
 Delivery retries transport errors, `5xx`, and `429` with exponential backoff
 (±50% jitter); other `4xx` are treated as permanent. The last messages are also
 available without a webhook:
@@ -153,16 +185,19 @@ curl -s "${H[@]}" "localhost:9900/sessions/personal/messages?limit=20"
 | `GET /sessions/{id}/qr` | Latest rotating QR code. |
 | `POST /sessions/{id}/logout` | Unlink the device (keeps the session row). |
 | `DELETE /sessions/{id}` | Delete the session and its device entirely. |
-| `POST /sessions/{id}/messages` | Send text. Body: `{"to", "text", "typing"?}`. |
+| `POST /sessions/{id}/messages` | Send text (JSON `{"to","text","typing"?}`) or media (multipart: `to`, `caption`, `typing`, `file`). |
 | `GET /sessions/{id}/messages?limit=50` | Recent inbound messages, newest first. |
+| `GET /sessions/{id}/media?token=…` | Download an inbound attachment (streams raw bytes). |
 
 Every response uses the envelope `{"data": ...}` or
 `{"error": {"code", "message"}}` with `{"meta": {"request_id"}}`; the HTTP status
 is authoritative. Stable error codes include `unauthorized`, `invalid_json`,
 `invalid_session_id`, `missing_text`, `invalid_recipient`, `invalid_typing`,
-`invalid_limit`, `session_not_found`, `qr_not_available`, `session_exists`,
+`invalid_limit`, `invalid_token`, `invalid_multipart`, `missing_file`,
+`missing_media`, `session_not_found`, `qr_not_available`, `session_exists`,
 `already_connected`, `not_connected`, `not_logged_in`, `queue_full`,
-`send_failed`, `unknown_route`, `internal`.
+`media_too_large`, `send_failed`, `media_download_failed`, `unknown_route`,
+`internal`.
 
 ## Configuration
 
@@ -178,6 +213,7 @@ All configuration is via `WAVONYX_*` environment variables — see
 | `WAVONYX_WEBHOOK_URL` / `_SECRET` | *(empty)* | Inbound delivery + HMAC key. |
 | `WAVONYX_TYPING_MODE` | `natural` | `off` \| `constant` \| `natural`. |
 | `WAVONYX_SEND_MIN_GAP` | `1s` | Pause between sends per session. |
+| `WAVONYX_MAX_MEDIA_BYTES` | `64MB` | Max outbound media file size. |
 
 ### Simulated typing
 

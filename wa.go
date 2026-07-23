@@ -2,6 +2,7 @@ package wavonyx
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -34,10 +35,19 @@ type waSendResult struct {
 	Timestamp time.Time
 }
 
+// outboundMedia is an attachment to upload and send.
+type outboundMedia struct {
+	Data     []byte
+	Mimetype string
+	Kind     string // KindImage/KindVideo/KindAudio/KindVoice/KindDocument
+	Caption  string
+	Filename string
+}
+
 // waHandlers are the callbacks a session registers on its client. Any field may
 // be nil.
 type waHandlers struct {
-	OnMessage      func(InboundMessage)
+	OnMessage      func(eventType string, m InboundMessage)
 	OnConnected    func()
 	OnDisconnected func()
 	OnLoggedOut    func()
@@ -60,11 +70,14 @@ type waClient interface {
 	JID() string      // "" until paired
 	PushName() string // "" until known
 	SendText(ctx context.Context, jid, text string) (waSendResult, error)
+	SendMedia(ctx context.Context, jid string, m outboundMedia) (waSendResult, error)
 	SendAvailable(ctx context.Context) error                     // presence "available"
 	SetComposing(ctx context.Context, jid string, on bool) error // typing indicator
 	// MarkRead sends a read receipt (blue ticks) for the given inbound message
 	// ids. chat is the chat JID; sender is the author (required for groups).
 	MarkRead(ctx context.Context, ids []string, ts time.Time, chat, sender string) error
+	// DownloadMedia fetches and decrypts the attachment referenced by ref.
+	DownloadMedia(ctx context.Context, ref mediaRef) ([]byte, error)
 }
 
 // waStore abstracts the whatsmeow device store (an sqlstore.Container).
@@ -160,8 +173,8 @@ func (c *realClient) SetHandlers(h waHandlers) {
 		switch e := evt.(type) {
 		case *events.Message:
 			if h.OnMessage != nil {
-				if m, ok := parseMessage(e); ok {
-					h.OnMessage(m)
+				if m, evType, ok := parseMessage(e); ok {
+					h.OnMessage(evType, m)
 				}
 			}
 		case *events.Connected:
@@ -231,6 +244,79 @@ func (c *realClient) SendText(ctx context.Context, jid, text string) (waSendResu
 	return waSendResult{ID: resp.ID, Timestamp: resp.Timestamp}, nil
 }
 
+func (c *realClient) SendMedia(ctx context.Context, jid string, m outboundMedia) (waSendResult, error) {
+	j, err := types.ParseJID(jid)
+	if err != nil {
+		return waSendResult{}, err
+	}
+	up, err := c.cli.Upload(ctx, m.Data, mediaTypeFor(m.Kind))
+	if err != nil {
+		return waSendResult{}, err
+	}
+	resp, err := c.cli.SendMessage(ctx, j, buildMediaMessage(m, up))
+	if err != nil {
+		return waSendResult{}, err
+	}
+	return waSendResult{ID: resp.ID, Timestamp: resp.Timestamp}, nil
+}
+
+func mediaTypeFor(kind string) whatsmeow.MediaType {
+	switch kind {
+	case KindVideo:
+		return whatsmeow.MediaVideo
+	case KindAudio, KindVoice:
+		return whatsmeow.MediaAudio
+	case KindDocument:
+		return whatsmeow.MediaDocument
+	default: // image / sticker
+		return whatsmeow.MediaImage
+	}
+}
+
+// buildMediaMessage assembles the protobuf message for an uploaded attachment.
+func buildMediaMessage(m outboundMedia, up whatsmeow.UploadResponse) *waE2E.Message {
+	switch m.Kind {
+	case KindVideo:
+		return &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+			URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath),
+			MediaKey: up.MediaKey, FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256,
+			FileLength: proto.Uint64(up.FileLength), Mimetype: proto.String(m.Mimetype),
+			Caption: strOrNil(m.Caption),
+		}}
+	case KindAudio, KindVoice:
+		am := &waE2E.AudioMessage{
+			URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath),
+			MediaKey: up.MediaKey, FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256,
+			FileLength: proto.Uint64(up.FileLength), Mimetype: proto.String(m.Mimetype),
+		}
+		if m.Kind == KindVoice {
+			am.PTT = proto.Bool(true)
+		}
+		return &waE2E.Message{AudioMessage: am}
+	case KindDocument:
+		return &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+			URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath),
+			MediaKey: up.MediaKey, FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256,
+			FileLength: proto.Uint64(up.FileLength), Mimetype: proto.String(m.Mimetype),
+			FileName: strOrNil(m.Filename), Caption: strOrNil(m.Caption),
+		}}
+	default: // image
+		return &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+			URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath),
+			MediaKey: up.MediaKey, FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256,
+			FileLength: proto.Uint64(up.FileLength), Mimetype: proto.String(m.Mimetype),
+			Caption: strOrNil(m.Caption),
+		}}
+	}
+}
+
+func strOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 func (c *realClient) SendAvailable(ctx context.Context) error {
 	return c.cli.SendPresence(ctx, types.PresenceAvailable)
 }
@@ -262,4 +348,31 @@ func (c *realClient) MarkRead(ctx context.Context, ids []string, ts time.Time, c
 		}
 	}
 	return c.cli.MarkRead(ctx, ids, ts, chatJID, senderJID)
+}
+
+func (c *realClient) DownloadMedia(ctx context.Context, ref mediaRef) ([]byte, error) {
+	dl := reconstructDownloadable(ref)
+	if dl == nil {
+		return nil, fmt.Errorf("unsupported media kind %q", ref.Kind)
+	}
+	return c.cli.Download(ctx, dl)
+}
+
+// reconstructDownloadable rebuilds the minimal protobuf message whatsmeow needs
+// to download an attachment from a mediaRef. The concrete type tells whatsmeow
+// which media endpoint and encryption keys to use.
+func reconstructDownloadable(ref mediaRef) whatsmeow.DownloadableMessage {
+	switch ref.Kind {
+	case KindImage:
+		return &waE2E.ImageMessage{URL: proto.String(ref.URL), DirectPath: proto.String(ref.DirectPath), MediaKey: ref.MediaKey, FileEncSHA256: ref.EncSHA256, FileSHA256: ref.SHA256, FileLength: proto.Uint64(ref.FileLength), Mimetype: proto.String(ref.Mimetype)}
+	case KindVideo:
+		return &waE2E.VideoMessage{URL: proto.String(ref.URL), DirectPath: proto.String(ref.DirectPath), MediaKey: ref.MediaKey, FileEncSHA256: ref.EncSHA256, FileSHA256: ref.SHA256, FileLength: proto.Uint64(ref.FileLength), Mimetype: proto.String(ref.Mimetype)}
+	case KindAudio, KindVoice:
+		return &waE2E.AudioMessage{URL: proto.String(ref.URL), DirectPath: proto.String(ref.DirectPath), MediaKey: ref.MediaKey, FileEncSHA256: ref.EncSHA256, FileSHA256: ref.SHA256, FileLength: proto.Uint64(ref.FileLength), Mimetype: proto.String(ref.Mimetype)}
+	case KindDocument:
+		return &waE2E.DocumentMessage{URL: proto.String(ref.URL), DirectPath: proto.String(ref.DirectPath), MediaKey: ref.MediaKey, FileEncSHA256: ref.EncSHA256, FileSHA256: ref.SHA256, FileLength: proto.Uint64(ref.FileLength), Mimetype: proto.String(ref.Mimetype)}
+	case KindSticker:
+		return &waE2E.StickerMessage{URL: proto.String(ref.URL), DirectPath: proto.String(ref.DirectPath), MediaKey: ref.MediaKey, FileEncSHA256: ref.EncSHA256, FileSHA256: ref.SHA256, FileLength: proto.Uint64(ref.FileLength), Mimetype: proto.String(ref.Mimetype)}
+	}
+	return nil
 }

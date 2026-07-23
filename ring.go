@@ -43,6 +43,23 @@ func (r *Ring) Append(m InboundMessage) {
 	}
 }
 
+// Update finds the buffered message with the given id and applies apply to it
+// in place, returning whether a match was found. Used to reflect message edits.
+func (r *Ring) Update(id string, apply func(*InboundMessage)) bool {
+	if id == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.buf {
+		if r.buf[i].MessageID == id {
+			apply(&r.buf[i])
+			return true
+		}
+	}
+	return false
+}
+
 // Recent returns up to limit buffered messages, newest first. A limit <= 0 or
 // greater than the number of buffered messages returns all of them. The result
 // is a fresh copy the caller may retain.

@@ -57,8 +57,10 @@ type session struct {
 
 type sendJob struct {
 	ctx        context.Context
-	req        SendRequest
 	to         string
+	text       string // text body, or media caption
+	typing     *typing.Override
+	media      *outboundMedia // nil for text sends
 	out        chan sendOutcome
 	enqueuedAt time.Time
 }
@@ -323,19 +325,31 @@ func (s *session) onLoggedOut() {
 	s.mu.Unlock()
 }
 
-func (s *session) onMessage(m InboundMessage) {
+func (s *session) onMessage(eventType string, m InboundMessage) {
 	if m.IsFromMe && !s.cfg.IncludeFromMe {
 		return
 	}
-	s.ring.Append(m)
-	if !m.IsFromMe && m.MessageID != "" {
-		s.trackUnread(m)
+	switch eventType {
+	case EventMessage:
+		s.ring.Append(m)
+		if !m.IsFromMe && m.MessageID != "" {
+			s.trackUnread(m)
+		}
+	case EventEdit:
+		// Reflect the new content in the buffered copy, if still present.
+		s.ring.Update(m.EditedID, func(e *InboundMessage) {
+			e.Text = m.Text
+			e.Kind = m.Kind
+			e.Media = m.Media
+		})
+	case EventRevoke:
+		// Deleted for everyone; leave the ring as-is and just deliver the event.
 	}
 	s.mu.Lock()
 	url := s.webhookURL
 	s.mu.Unlock()
 	if s.hooks != nil {
-		s.hooks.Enqueue(url, Event{Event: EventMessage, SessionID: s.id, TS: time.Now().UTC(), Data: m})
+		s.hooks.Enqueue(url, Event{Event: eventType, SessionID: s.id, TS: time.Now().UTC(), Data: m})
 	}
 }
 
@@ -452,15 +466,45 @@ func (s *session) send(ctx context.Context, req SendRequest) (*SendResult, error
 	if err != nil {
 		return nil, err
 	}
+	return s.enqueue(ctx, &sendJob{ctx: ctx, to: to, text: req.Text, typing: req.Typing})
+}
 
+func (s *session) sendMedia(ctx context.Context, req MediaSendRequest) (*SendResult, error) {
+	if len(req.Data) == 0 {
+		return nil, ErrMissingMedia
+	}
+	if s.cfg.MaxMediaBytes > 0 && int64(len(req.Data)) > s.cfg.MaxMediaBytes {
+		return nil, ErrMediaTooLarge
+	}
+	if err := validateTypingOverride(req.Typing); err != nil {
+		return nil, err
+	}
+	to, err := NormalizeRecipient(req.To)
+	if err != nil {
+		return nil, err
+	}
+	media := &outboundMedia{
+		Data:     req.Data,
+		Mimetype: req.Mimetype,
+		Kind:     mediaKindFromMimetype(req.Mimetype),
+		Caption:  req.Caption,
+		Filename: req.Filename,
+	}
+	return s.enqueue(ctx, &sendJob{ctx: ctx, to: to, text: req.Caption, typing: req.Typing, media: media})
+}
+
+// enqueue submits a prepared job to the per-session worker and waits for its
+// outcome. Sends are refused unless the session is connected, and fail fast
+// with ErrQueueFull when the queue is full.
+func (s *session) enqueue(ctx context.Context, job *sendJob) (*SendResult, error) {
 	s.mu.Lock()
 	status := s.status
 	s.mu.Unlock()
 	if status != StatusConnected {
 		return nil, ErrNotConnected
 	}
-
-	job := &sendJob{ctx: ctx, req: req, to: to, out: make(chan sendOutcome, 1), enqueuedAt: time.Now()}
+	job.out = make(chan sendOutcome, 1)
+	job.enqueuedAt = time.Now()
 	select {
 	case s.sendCh <- job:
 	default:
@@ -472,6 +516,28 @@ func (s *session) send(ctx context.Context, req SendRequest) (*SendResult, error
 	case out := <-job.out:
 		return out.res, out.err
 	}
+}
+
+// downloadMedia decrypts and returns the attachment referenced by token. It
+// does not go through the send queue — downloads are read-only and can run
+// concurrently.
+func (s *session) downloadMedia(ctx context.Context, token string) (*MediaContent, error) {
+	ref, err := decodeMediaRef(token)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	client := s.client
+	connected := s.status == StatusConnected
+	s.mu.Unlock()
+	if !connected || client == nil {
+		return nil, ErrNotConnected
+	}
+	data, err := client.DownloadMedia(ctx, ref)
+	if err != nil {
+		return nil, &MediaError{Err: err}
+	}
+	return &MediaContent{Data: data, Mimetype: ref.Mimetype, Filename: ref.Filename}, nil
 }
 
 func (s *session) runWorker() {
@@ -514,7 +580,7 @@ func (s *session) process(job *sendJob) {
 	queuedMS := time.Since(job.enqueuedAt).Milliseconds()
 
 	var typingMS int64
-	if dur := typing.Duration(job.req.Text, typingCfg.Apply(job.req.Typing), s.rng); dur > 0 {
+	if dur := typing.Duration(job.text, typingCfg.Apply(job.typing), s.rng); dur > 0 {
 		typingMS = dur.Milliseconds()
 		if !s.simulateTyping(job.ctx, client, job.to, dur) {
 			if err := job.ctx.Err(); err != nil {
@@ -528,8 +594,18 @@ func (s *session) process(job *sendJob) {
 
 	// Commit: once we send, the request must complete even if the caller goes
 	// away, so we don't leave the send in an ambiguous state.
-	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(job.ctx), 30*time.Second)
-	res, err := client.SendText(sendCtx, job.to, job.req.Text)
+	timeout := 30 * time.Second
+	if job.media != nil {
+		timeout = 2 * time.Minute // uploads can be slow
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(job.ctx), timeout)
+	var res waSendResult
+	var err error
+	if job.media != nil {
+		res, err = client.SendMedia(sendCtx, job.to, *job.media)
+	} else {
+		res, err = client.SendText(sendCtx, job.to, job.text)
+	}
 	cancel()
 	if err != nil {
 		job.out <- sendOutcome{err: &SendError{To: job.to, Err: err}}

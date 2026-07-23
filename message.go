@@ -24,33 +24,41 @@ const (
 	StatusLoggedOut Status = "logged_out"
 )
 
-// Message kinds carried in InboundMessage.Kind.
+// Message kinds carried in InboundMessage.Kind. Media captions go in Text.
 const (
-	KindText            = "text"
-	KindExtendedText    = "extended_text"
-	KindImageCaption    = "image_caption"
-	KindVideoCaption    = "video_caption"
-	KindDocumentCaption = "document_caption"
+	KindText     = "text"
+	KindImage    = "image"
+	KindVideo    = "video"
+	KindAudio    = "audio"
+	KindVoice    = "voice" // push-to-talk voice note
+	KindDocument = "document"
+	KindSticker  = "sticker"
 )
 
-// EventMessage is the webhook event type for an inbound message.
-const EventMessage = "message"
+// Webhook event types.
+const (
+	EventMessage = "message"        // a new inbound message
+	EventEdit    = "message.edit"   // a previous message's content changed
+	EventRevoke  = "message.revoke" // a previous message was deleted for everyone
+)
 
 // InboundMessage is a parsed incoming WhatsApp message. It is also the payload
 // carried by a webhook "message" event and returned by the ring-buffer
 // endpoint.
 type InboundMessage struct {
-	MessageID   string    `json:"message_id"`
-	Chat        string    `json:"chat"`         // JID: "...@s.whatsapp.net" or "...@g.us"
-	Sender      string    `json:"sender"`       // participant JID (differs from Chat in groups)
-	SenderPhone string    `json:"sender_phone"` // digits only; "" if unresolvable
-	PushName    string    `json:"push_name"`
-	IsGroup     bool      `json:"is_group"`
-	IsFromMe    bool      `json:"is_from_me"`
-	Timestamp   time.Time `json:"timestamp"`
-	Kind        string    `json:"kind"`
-	Text        string    `json:"text"`
-	Quoted      *Quoted   `json:"quoted,omitempty"`
+	MessageID   string     `json:"message_id"`
+	Chat        string     `json:"chat"`         // JID: "...@s.whatsapp.net" or "...@g.us"
+	Sender      string     `json:"sender"`       // participant JID (differs from Chat in groups)
+	SenderPhone string     `json:"sender_phone"` // digits only; "" if unresolvable
+	PushName    string     `json:"push_name"`
+	IsGroup     bool       `json:"is_group"`
+	IsFromMe    bool       `json:"is_from_me"`
+	Timestamp   time.Time  `json:"timestamp"`
+	Kind        string     `json:"kind"`
+	Text        string     `json:"text"`
+	EditedID    string     `json:"edited_id,omitempty"` // message.edit: the original message being changed
+	Media       *MediaInfo `json:"media,omitempty"`
+	Quoted      *Quoted    `json:"quoted,omitempty"`
 }
 
 // Quoted is the message an inbound message replied to, when present.
@@ -58,6 +66,26 @@ type Quoted struct {
 	MessageID string `json:"message_id"`
 	Sender    string `json:"sender"`
 	Text      string `json:"text"`
+}
+
+// MediaInfo describes an inbound media attachment. Token is an opaque reference
+// passed to GET /sessions/{id}/media to download the actual bytes; it is only
+// valid for a limited time (WhatsApp's media CDN paths expire).
+type MediaInfo struct {
+	Mimetype string `json:"mimetype,omitempty"`
+	FileSize uint64 `json:"file_size,omitempty"`
+	Filename string `json:"filename,omitempty"` // documents
+	Width    int    `json:"width,omitempty"`    // image/video/sticker
+	Height   int    `json:"height,omitempty"`   // image/video/sticker
+	Duration int    `json:"duration,omitempty"` // seconds, audio/video
+	Token    string `json:"token"`
+}
+
+// MediaContent is downloaded media, ready to be served.
+type MediaContent struct {
+	Data     []byte
+	Mimetype string
+	Filename string
 }
 
 // SendRequest is the body of POST /sessions/{id}/messages. Typing is optional;
@@ -113,6 +141,33 @@ type SendResult struct {
 	Timestamp time.Time `json:"timestamp"`
 	TypingMS  int64     `json:"typing_ms"`
 	QueuedMS  int64     `json:"queued_ms"`
+}
+
+// MediaSendRequest carries an outbound attachment. The HTTP server builds it
+// from a multipart request; Data holds the raw file bytes. Kind is derived from
+// Mimetype (see mediaKindFromMimetype).
+type MediaSendRequest struct {
+	To       string
+	Caption  string
+	Typing   *typing.Override
+	Data     []byte
+	Mimetype string
+	Filename string
+}
+
+// mediaKindFromMimetype maps a MIME type to a Wavonyx media kind. Anything not
+// recognized as image/video/audio is sent as a document.
+func mediaKindFromMimetype(mt string) string {
+	switch {
+	case strings.HasPrefix(mt, "image/"):
+		return KindImage
+	case strings.HasPrefix(mt, "video/"):
+		return KindVideo
+	case strings.HasPrefix(mt, "audio/"):
+		return KindAudio
+	default:
+		return KindDocument
+	}
 }
 
 // SessionInfo is the public view of a session.

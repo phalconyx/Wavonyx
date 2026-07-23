@@ -279,6 +279,137 @@ func TestMarkReadMatchesLIDByPhone(t *testing.T) {
 	}
 }
 
+func TestDownloadMedia(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	store.script = pairScript("C")
+	store.pairJID = "628000@s.whatsapp.net"
+	m, _ := newTestManager(t, store, Config{})
+
+	create(t, m, "personal")
+	if _, err := m.Login(ctx, "personal"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	waitStatus(t, m, "personal", StatusConnected, 2*time.Second)
+
+	token := encodeMediaRef(mediaRef{Kind: KindImage, DirectPath: "/v/x", MediaKey: []byte("k"), Mimetype: "image/png"})
+	content, err := m.DownloadMedia(ctx, "personal", token)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if string(content.Data) != "FAKEMEDIA:image" || content.Mimetype != "image/png" {
+		t.Fatalf("content: data=%q mimetype=%q", content.Data, content.Mimetype)
+	}
+
+	if _, err := m.DownloadMedia(ctx, "personal", "!!!not-a-token"); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("invalid token: got %v", err)
+	}
+}
+
+func TestDownloadMediaNotConnected(t *testing.T) {
+	m, _ := newTestManager(t, newFakeStore(), Config{})
+	create(t, m, "personal")
+	token := encodeMediaRef(mediaRef{Kind: KindImage, DirectPath: "/v/x", MediaKey: []byte("k")})
+	if _, err := m.DownloadMedia(context.Background(), "personal", token); !errors.Is(err, ErrNotConnected) {
+		t.Fatalf("want ErrNotConnected, got %v", err)
+	}
+}
+
+func TestSendMedia(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	store.script = pairScript("C")
+	store.pairJID = "628000@s.whatsapp.net"
+	m, _ := newTestManager(t, store, Config{Typing: typing.Config{Mode: typing.ModeOff}, SendMinGap: 0})
+
+	create(t, m, "personal")
+	if _, err := m.Login(ctx, "personal"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	waitStatus(t, m, "personal", StatusConnected, 2*time.Second)
+
+	fc := store.client()
+	fc.resetCalls()
+	res, err := m.SendMedia(ctx, "personal", MediaSendRequest{
+		To: "628999888777", Caption: "check", Data: []byte("JPEGDATA"), Mimetype: "image/jpeg", Filename: "a.jpg",
+	})
+	if err != nil {
+		t.Fatalf("send media: %v", err)
+	}
+	if res.MessageID != "FAKEID" || res.To != "628999888777@s.whatsapp.net" {
+		t.Fatalf("result: %+v", res)
+	}
+	if got := fc.actions(); !equalStr(got, []string{"sendmedia:image"}) {
+		t.Fatalf("calls: %v", got)
+	}
+}
+
+func TestSendMediaTooLarge(t *testing.T) {
+	m, _ := newTestManager(t, newFakeStore(), Config{MaxMediaBytes: 4})
+	create(t, m, "personal")
+	if _, err := m.SendMedia(context.Background(), "personal", MediaSendRequest{To: "628999888777", Data: []byte("toolong"), Mimetype: "image/jpeg"}); !errors.Is(err, ErrMediaTooLarge) {
+		t.Fatalf("want ErrMediaTooLarge, got %v", err)
+	}
+}
+
+func TestSendMediaMissing(t *testing.T) {
+	m, _ := newTestManager(t, newFakeStore(), Config{})
+	create(t, m, "personal")
+	if _, err := m.SendMedia(context.Background(), "personal", MediaSendRequest{To: "628999888777", Mimetype: "image/jpeg"}); !errors.Is(err, ErrMissingMedia) {
+		t.Fatalf("want ErrMissingMedia, got %v", err)
+	}
+}
+
+func TestEditUpdatesRing(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	store.script = pairScript("C")
+	store.pairJID = "628000@s.whatsapp.net"
+	m, sink := newTestManagerSink(t, store, Config{})
+
+	create(t, m, "personal")
+	if _, err := m.Login(ctx, "personal"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	waitStatus(t, m, "personal", StatusConnected, 2*time.Second)
+
+	fc := store.client()
+	fc.fireMessage(InboundMessage{MessageID: "M1", Chat: "628999888777@s.whatsapp.net", Sender: "628999888777@s.whatsapp.net", Kind: KindText, Text: "original"})
+	fc.fireEvent(EventEdit, InboundMessage{MessageID: "EDIT1", EditedID: "M1", Kind: KindText, Text: "corrected"})
+
+	recent, _ := m.Recent(ctx, "personal", 10)
+	if len(recent) != 1 || recent[0].MessageID != "M1" || recent[0].Text != "corrected" {
+		t.Fatalf("ring after edit: %+v", recent)
+	}
+	evs := sink.all()
+	if len(evs) != 2 || evs[0].Event != EventMessage || evs[1].Event != EventEdit || evs[1].Data.EditedID != "M1" {
+		t.Fatalf("events: %+v", evs)
+	}
+}
+
+func TestRevokeEvent(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	store.script = pairScript("C")
+	store.pairJID = "628000@s.whatsapp.net"
+	m, sink := newTestManagerSink(t, store, Config{})
+
+	create(t, m, "personal")
+	if _, err := m.Login(ctx, "personal"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	waitStatus(t, m, "personal", StatusConnected, 2*time.Second)
+
+	store.client().fireEvent(EventRevoke, InboundMessage{MessageID: "DELETED", Chat: "628999888777@s.whatsapp.net", Sender: "628999888777@s.whatsapp.net"})
+
+	if evs := sink.all(); len(evs) != 1 || evs[0].Event != EventRevoke || evs[0].Data.MessageID != "DELETED" {
+		t.Fatalf("revoke events: %+v", evs)
+	}
+	if recent, _ := m.Recent(ctx, "personal", 10); len(recent) != 0 {
+		t.Fatalf("ring should stay empty after revoke: %+v", recent)
+	}
+}
+
 func TestLoggedOutEvent(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeStore()

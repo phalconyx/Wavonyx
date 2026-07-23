@@ -35,7 +35,9 @@ type SessionAPI interface {
 	Logout(ctx context.Context, id string) error
 	Delete(ctx context.Context, id string) error
 	Send(ctx context.Context, id string, req SendRequest) (*SendResult, error)
+	SendMedia(ctx context.Context, id string, req MediaSendRequest) (*SendResult, error)
 	Recent(ctx context.Context, id string, limit int) ([]InboundMessage, error)
+	DownloadMedia(ctx context.Context, id, token string) (*MediaContent, error)
 }
 
 // webhookSink is the webhook dispatcher as the manager uses it.
@@ -327,12 +329,28 @@ func (m *Manager) Send(ctx context.Context, id string, req SendRequest) (*SendRe
 	return s.send(ctx, req)
 }
 
+func (m *Manager) SendMedia(ctx context.Context, id string, req MediaSendRequest) (*SendResult, error) {
+	s, err := m.session(id)
+	if err != nil {
+		return nil, err
+	}
+	return s.sendMedia(ctx, req)
+}
+
 func (m *Manager) Recent(ctx context.Context, id string, limit int) ([]InboundMessage, error) {
 	s, err := m.session(id)
 	if err != nil {
 		return nil, err
 	}
 	return s.ring.Recent(limit), nil
+}
+
+func (m *Manager) DownloadMedia(ctx context.Context, id, token string) (*MediaContent, error) {
+	s, err := m.session(id)
+	if err != nil {
+		return nil, err
+	}
+	return s.downloadMedia(ctx, token)
 }
 
 func genSessionID() string {

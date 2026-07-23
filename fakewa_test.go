@@ -202,6 +202,17 @@ func (c *fakeClient) SendText(ctx context.Context, jid, text string) (waSendResu
 	return res, nil
 }
 
+func (c *fakeClient) SendMedia(ctx context.Context, jid string, m outboundMedia) (waSendResult, error) {
+	c.mu.Lock()
+	c.calls = append(c.calls, "sendmedia:"+m.Kind)
+	err, res := c.sendErr, c.sendResult
+	c.mu.Unlock()
+	if err != nil {
+		return waSendResult{}, err
+	}
+	return res, nil
+}
+
 func (c *fakeClient) SendAvailable(ctx context.Context) error {
 	c.mu.Lock()
 	c.calls = append(c.calls, "available")
@@ -227,14 +238,25 @@ func (c *fakeClient) MarkRead(ctx context.Context, ids []string, ts time.Time, c
 	return nil
 }
 
+func (c *fakeClient) DownloadMedia(ctx context.Context, ref mediaRef) ([]byte, error) {
+	c.mu.Lock()
+	c.calls = append(c.calls, "download:"+ref.Kind)
+	c.mu.Unlock()
+	return []byte("FAKEMEDIA:" + ref.Kind), nil
+}
+
 // --- test helpers ---
 
 func (c *fakeClient) fireMessage(m InboundMessage) {
+	c.fireEvent(EventMessage, m)
+}
+
+func (c *fakeClient) fireEvent(evType string, m InboundMessage) {
 	c.mu.Lock()
 	h := c.handlers
 	c.mu.Unlock()
 	if h.OnMessage != nil {
-		h.OnMessage(m)
+		h.OnMessage(evType, m)
 	}
 }
 

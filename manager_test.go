@@ -5,12 +5,52 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/phalconyx/wavonyx/internal/registry"
 	"go.mau.fi/whatsmeow/store"
 )
+
+// fakeSink is a webhookSink that records enqueued events for assertions.
+type fakeSink struct {
+	mu     sync.Mutex
+	events []Event
+}
+
+func (f *fakeSink) Enqueue(url string, ev Event) {
+	f.mu.Lock()
+	f.events = append(f.events, ev)
+	f.mu.Unlock()
+}
+func (f *fakeSink) Close() {}
+func (f *fakeSink) all() []Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]Event, len(f.events))
+	copy(out, f.events)
+	return out
+}
+
+// newTestManagerSink is newTestManager with a recording webhook sink.
+func newTestManagerSink(t *testing.T, store *fakeStore, cfg Config) (*Manager, *fakeSink) {
+	t.Helper()
+	dsn := "file:" + filepath.Join(t.TempDir(), "mgr.db") + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	reg := registry.New(db)
+	if err := reg.Init(context.Background()); err != nil {
+		t.Fatalf("registry init: %v", err)
+	}
+	sink := &fakeSink{}
+	m := newManager(cfg.withDefaults(), store, reg, sink, nil, nil)
+	t.Cleanup(func() { _ = m.Close() })
+	return m, sink
+}
 
 // newTestManager builds a Manager backed by an in-memory fake store, a real
 // registry on a temp modernc.org/sqlite database, and a no-URL dispatcher

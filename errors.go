@@ -31,6 +31,12 @@ var (
 	ErrEmptyText = errors.New("wavonyx: message text is empty")
 	// ErrInvalidTyping means the request's typing options were out of range.
 	ErrInvalidTyping = errors.New("wavonyx: invalid typing options")
+	// ErrInvalidToken means a media download token could not be decoded.
+	ErrInvalidToken = errors.New("wavonyx: invalid media token")
+	// ErrMissingMedia means an outbound media send had no file data.
+	ErrMissingMedia = errors.New("wavonyx: missing media data")
+	// ErrMediaTooLarge means an outbound media file exceeded MaxMediaBytes.
+	ErrMediaTooLarge = errors.New("wavonyx: media file too large")
 )
 
 // SendError wraps a failure to deliver an outgoing message to WhatsApp. It
@@ -46,3 +52,14 @@ func (e *SendError) Error() string {
 }
 
 func (e *SendError) Unwrap() error { return e.Err }
+
+// MediaError wraps a failure to download inbound media.
+type MediaError struct {
+	Err error
+}
+
+func (e *MediaError) Error() string {
+	return fmt.Sprintf("wavonyx: media download failed: %v", e.Err)
+}
+
+func (e *MediaError) Unwrap() error { return e.Err }

@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,20 +22,23 @@ type fakeAPI struct {
 	qr     *wavonyx.QRInfo
 	result *wavonyx.SendResult
 	recent []wavonyx.InboundMessage
+	media  *wavonyx.MediaContent
 
-	createErr error
-	getErr    error
-	loginErr  error
-	qrErr     error
-	logoutErr error
-	deleteErr error
-	sendErr   error
-	recentErr error
+	createErr   error
+	getErr      error
+	loginErr    error
+	qrErr       error
+	logoutErr   error
+	deleteErr   error
+	sendErr     error
+	recentErr   error
+	downloadErr error
 
 	lastCreateID   string
 	lastCreateHook string
 	lastSendID     string
 	lastSendReq    wavonyx.SendRequest
+	lastMediaReq   wavonyx.MediaSendRequest
 }
 
 var _ wavonyx.SessionAPI = (*fakeAPI)(nil)
@@ -73,11 +78,24 @@ func (f *fakeAPI) Send(ctx context.Context, id string, req wavonyx.SendRequest) 
 	}
 	return f.result, nil
 }
+func (f *fakeAPI) SendMedia(ctx context.Context, id string, req wavonyx.MediaSendRequest) (*wavonyx.SendResult, error) {
+	f.lastSendID, f.lastMediaReq = id, req
+	if f.sendErr != nil {
+		return nil, f.sendErr
+	}
+	return f.result, nil
+}
 func (f *fakeAPI) Recent(ctx context.Context, id string, limit int) ([]wavonyx.InboundMessage, error) {
 	if f.recentErr != nil {
 		return nil, f.recentErr
 	}
 	return f.recent, nil
+}
+func (f *fakeAPI) DownloadMedia(ctx context.Context, id, token string) (*wavonyx.MediaContent, error) {
+	if f.downloadErr != nil {
+		return nil, f.downloadErr
+	}
+	return f.media, nil
 }
 
 func do(t *testing.T, h http.Handler, method, path, apiKey, body string) (*http.Response, map[string]any) {
@@ -251,5 +269,93 @@ func TestRequestIDEchoedAndSanitized(t *testing.T) {
 	got := rec.Result().Header.Get("X-Request-Id")
 	if got != "abc-123_badinject" {
 		t.Fatalf("sanitized request id = %q", got)
+	}
+}
+
+func TestDownloadMediaEndpoint(t *testing.T) {
+	f := &fakeAPI{media: &wavonyx.MediaContent{Data: []byte("JPEGBYTES"), Mimetype: "image/jpeg", Filename: "photo.jpg"}}
+	h := New(f, Config{})
+
+	// Success streams raw bytes (no envelope) with hardening headers.
+	req := httptest.NewRequest("GET", "/sessions/personal/media?token=abc", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	res := rec.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); ct != "image/jpeg" {
+		t.Fatalf("content-type: %q", ct)
+	}
+	if cd := res.Header.Get("Content-Disposition"); !strings.Contains(cd, "photo.jpg") {
+		t.Fatalf("disposition: %q", cd)
+	}
+	if res.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("missing nosniff header")
+	}
+	if body, _ := io.ReadAll(res.Body); string(body) != "JPEGBYTES" {
+		t.Fatalf("body: %q", body)
+	}
+
+	// Missing token -> 400 invalid_token (enveloped).
+	if res, env := do(t, h, "GET", "/sessions/personal/media", "", ""); res.StatusCode != http.StatusBadRequest || errCode(t, env) != "invalid_token" {
+		t.Fatalf("missing token: status=%d env=%v", res.StatusCode, env)
+	}
+
+	// Download failure -> 502 media_download_failed.
+	h2 := New(&fakeAPI{downloadErr: &wavonyx.MediaError{Err: io.EOF}}, Config{})
+	if res, env := do(t, h2, "GET", "/sessions/personal/media?token=abc", "", ""); res.StatusCode != http.StatusBadGateway || errCode(t, env) != "media_download_failed" {
+		t.Fatalf("download err: status=%d env=%v", res.StatusCode, env)
+	}
+}
+
+func TestSendMediaMultipart(t *testing.T) {
+	f := &fakeAPI{result: &wavonyx.SendResult{MessageID: "MM1", To: "628@s.whatsapp.net"}}
+	h := New(f, Config{})
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("to", "628123")
+	_ = mw.WriteField("caption", "hello pic")
+	part, _ := mw.CreateFormFile("file", "photo.jpg")
+	_, _ = part.Write([]byte("\xff\xd8\xffJPEGDATA"))
+	_ = mw.Close()
+
+	req := httptest.NewRequest("POST", "/sessions/personal/messages", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	res := rec.Result()
+	if res.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status=%d body=%s", res.StatusCode, body)
+	}
+	if f.lastSendID != "personal" || f.lastMediaReq.To != "628123" || f.lastMediaReq.Caption != "hello pic" {
+		t.Fatalf("media req: id=%q %+v", f.lastSendID, f.lastMediaReq)
+	}
+	if f.lastMediaReq.Filename != "photo.jpg" || !strings.HasPrefix(f.lastMediaReq.Mimetype, "image/") {
+		t.Fatalf("filename/mimetype: %q / %q", f.lastMediaReq.Filename, f.lastMediaReq.Mimetype)
+	}
+	if string(f.lastMediaReq.Data) != "\xff\xd8\xffJPEGDATA" {
+		t.Fatalf("data: %q", f.lastMediaReq.Data)
+	}
+}
+
+func TestSendMediaMissingFile(t *testing.T) {
+	h := New(&fakeAPI{}, Config{})
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("to", "628123")
+	_ = mw.Close()
+
+	req := httptest.NewRequest("POST", "/sessions/personal/messages", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	res := rec.Result()
+	var env map[string]any
+	_ = json.NewDecoder(res.Body).Decode(&env)
+	if res.StatusCode != http.StatusBadRequest || errCode(t, env) != "missing_file" {
+		t.Fatalf("status=%d env=%v", res.StatusCode, env)
 	}
 }

@@ -33,6 +33,9 @@ type Config struct {
 	// RingSize is the per-session inbound ring-buffer capacity. Default: 200.
 	RingSize int
 
+	// MaxMediaBytes caps the size of a single outbound media file. Default: 64 MiB.
+	MaxMediaBytes int64
+
 	// IncludeFromMe controls whether messages authored on the linked phone or
 	// other devices (IsFromMe) are delivered to the webhook and ring buffer.
 	IncludeFromMe bool
@@ -55,6 +58,7 @@ func DefaultConfig() Config {
 		SendMinGap:    time.Second,
 		SendQueue:     100,
 		RingSize:      200,
+		MaxMediaBytes: 64 << 20,
 		IncludeFromMe: false,
 	}
 }
@@ -76,6 +80,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RingSize <= 0 {
 		c.RingSize = 200
+	}
+	if c.MaxMediaBytes <= 0 {
+		c.MaxMediaBytes = 64 << 20
 	}
 	if c.Typing.Mode == "" {
 		c.Typing = typing.Default()

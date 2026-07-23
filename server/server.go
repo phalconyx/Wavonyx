@@ -29,26 +29,41 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/phalconyx/wavonyx"
+	"github.com/phalconyx/wavonyx/typing"
 )
 
 // maxBodyBytes caps JSON request bodies.
 const maxBodyBytes = 1 << 20
+
+// Multipart (media send) parsing budgets.
+const (
+	multipartMemory   = 8 << 20 // in-memory budget before spilling to temp files
+	multipartOverhead = 1 << 20 // slack over MaxUploadBytes for fields and boundaries
+)
 
 // Config is the server configuration.
 type Config struct {
 	// APIKey, if non-empty, requires the X-API-Key header on all endpoints
 	// except /health.
 	APIKey string
+	// MaxUploadBytes caps a multipart media upload body. Default: 64 MiB.
+	MaxUploadBytes int64
 }
 
 // New returns a configured http.Handler backed by api.
 func New(api wavonyx.SessionAPI, cfg Config) http.Handler {
+	if cfg.MaxUploadBytes <= 0 {
+		cfg.MaxUploadBytes = 64 << 20
+	}
 	h := &handler{api: api, cfg: cfg}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", h.health)
@@ -61,6 +76,7 @@ func New(api wavonyx.SessionAPI, cfg Config) http.Handler {
 	mux.HandleFunc("DELETE /sessions/{id}", h.deleteSession)
 	mux.HandleFunc("POST /sessions/{id}/messages", h.sendMessage)
 	mux.HandleFunc("GET /sessions/{id}/messages", h.recentMessages)
+	mux.HandleFunc("GET /sessions/{id}/media", h.downloadMedia)
 	mux.HandleFunc("/", h.notFound)
 	return mux
 }
@@ -181,6 +197,10 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if !h.auth(w, r) {
 		return
 	}
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		h.sendMediaMessage(w, r)
+		return
+	}
 	var req wavonyx.SendRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -191,6 +211,83 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, r, http.StatusCreated, res)
+}
+
+// sendMediaMessage handles a multipart send: form fields to, caption, typing
+// (JSON), and a file part. The mimetype is sniffed from the part, the filename,
+// then the bytes.
+func (h *handler) sendMediaMessage(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxUploadBytes+multipartOverhead)
+	if err := r.ParseMultipartForm(multipartMemory); err != nil {
+		writeMediaBodyError(w, r, err)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "missing_file", "missing 'file' part")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		writeMediaBodyError(w, r, err)
+		return
+	}
+
+	req := wavonyx.MediaSendRequest{
+		To:       r.FormValue("to"),
+		Caption:  r.FormValue("caption"),
+		Data:     data,
+		Filename: header.Filename,
+		Mimetype: detectMimetype(header, data),
+	}
+	if tj := r.FormValue("typing"); tj != "" {
+		var ov typing.Override
+		if err := json.Unmarshal([]byte(tj), &ov); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid_typing", "typing field is not valid JSON")
+			return
+		}
+		req.Typing = &ov
+	}
+
+	res, err := h.api.SendMedia(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		writeAPIError(w, r, err)
+		return
+	}
+	writeData(w, r, http.StatusCreated, res)
+}
+
+func writeMediaBodyError(w http.ResponseWriter, r *http.Request, err error) {
+	if isBodyTooLarge(err) {
+		writeError(w, r, http.StatusRequestEntityTooLarge, "media_too_large", "media file exceeds the size limit")
+		return
+	}
+	writeError(w, r, http.StatusBadRequest, "invalid_multipart", "invalid multipart form")
+}
+
+func isBodyTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr) || (err != nil && strings.Contains(err.Error(), "request body too large"))
+}
+
+// detectMimetype resolves an upload's MIME type from the part header, then the
+// filename extension, then the content bytes.
+func detectMimetype(header *multipart.FileHeader, data []byte) string {
+	if ct := cleanMime(header.Header.Get("Content-Type")); ct != "" && ct != "application/octet-stream" {
+		return ct
+	}
+	if mt := cleanMime(mime.TypeByExtension(filepath.Ext(header.Filename))); mt != "" {
+		return mt
+	}
+	return cleanMime(http.DetectContentType(data))
+}
+
+func cleanMime(s string) string {
+	if i := strings.IndexByte(s, ';'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }
 
 func (h *handler) recentMessages(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +314,35 @@ func (h *handler) recentMessages(w http.ResponseWriter, r *http.Request) {
 	writeData(w, r, http.StatusOK, map[string]any{"messages": msgs, "count": len(msgs)})
 }
 
+// downloadMedia streams the decrypted bytes of an inbound attachment referenced
+// by the ?token= query parameter. On success it writes raw bytes (no envelope);
+// only pre-stream errors use the JSON envelope.
+func (h *handler) downloadMedia(w http.ResponseWriter, r *http.Request) {
+	if !h.auth(w, r) {
+		return
+	}
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		writeError(w, r, http.StatusBadRequest, "invalid_token", "missing media token")
+		return
+	}
+	content, err := h.api.DownloadMedia(r.Context(), r.PathValue("id"), token)
+	if err != nil {
+		writeAPIError(w, r, err)
+		return
+	}
+	ct := content.Mimetype
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilename(content.Filename)+`"`)
+	w.Header().Set("X-Request-Id", requestID(r))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content.Data)
+}
+
 func (h *handler) notFound(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, http.StatusNotFound, "unknown_route", "no such endpoint")
 }
@@ -240,11 +366,13 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 func writeAPIError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code := classify(err)
 	msg := err.Error()
-	switch status {
-	case http.StatusInternalServerError:
+	switch code {
+	case "internal":
 		msg = "internal error"
-	case http.StatusBadGateway:
+	case "send_failed":
 		msg = "failed to send message"
+	case "media_download_failed":
+		msg = "failed to download media"
 	}
 	writeError(w, r, status, code, msg)
 }
@@ -259,6 +387,12 @@ func classify(err error) (int, string) {
 		return http.StatusBadRequest, "invalid_recipient"
 	case errors.Is(err, wavonyx.ErrInvalidTyping):
 		return http.StatusBadRequest, "invalid_typing"
+	case errors.Is(err, wavonyx.ErrInvalidToken):
+		return http.StatusBadRequest, "invalid_token"
+	case errors.Is(err, wavonyx.ErrMissingMedia):
+		return http.StatusBadRequest, "missing_media"
+	case errors.Is(err, wavonyx.ErrMediaTooLarge):
+		return http.StatusRequestEntityTooLarge, "media_too_large"
 	case errors.Is(err, wavonyx.ErrSessionNotFound):
 		return http.StatusNotFound, "session_not_found"
 	case errors.Is(err, wavonyx.ErrQRNotAvailable):
@@ -277,6 +411,10 @@ func classify(err error) (int, string) {
 	var se *wavonyx.SendError
 	if errors.As(err, &se) {
 		return http.StatusBadGateway, "send_failed"
+	}
+	var me *wavonyx.MediaError
+	if errors.As(err, &me) {
+		return http.StatusBadGateway, "media_download_failed"
 	}
 	return http.StatusInternalServerError, "internal"
 }
@@ -335,4 +473,16 @@ func sanitizeRequestID(s string) string {
 			return -1
 		}
 	}, s)
+}
+
+// sanitizeFilename strips characters that would break the Content-Disposition
+// header, falling back to a default name.
+func sanitizeFilename(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, `"`, "")
+	if s == "" {
+		return "download"
+	}
+	return s
 }
