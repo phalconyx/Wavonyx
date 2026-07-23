@@ -1,0 +1,33 @@
+# Binaries
+bin/
+wavonyx
+wavonyx-*
+*.exe
+
+# Go
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Data (SQLite session store)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Build artefacts
+dist/
+out/

@@ -1,0 +1,34 @@
+services:
+  wavonyx:
+    build: .
+    image: wavonyx:local
+    restart: unless-stopped
+    ports:
+      - "${WAVONYX_PORT:-9900}:9900"
+    environment:
+      WAVONYX_ADDR: ":9900"
+      WAVONYX_DATA_DIR: "/data"
+      WAVONYX_API_KEY: "${WAVONYX_API_KEY:-}"
+      WAVONYX_WEBHOOK_URL: "${WAVONYX_WEBHOOK_URL:-}"
+      WAVONYX_WEBHOOK_SECRET: "${WAVONYX_WEBHOOK_SECRET:-}"
+      WAVONYX_WEBHOOK_TIMEOUT: "${WAVONYX_WEBHOOK_TIMEOUT:-10s}"
+      WAVONYX_WEBHOOK_RETRIES: "${WAVONYX_WEBHOOK_RETRIES:-5}"
+      WAVONYX_WEBHOOK_WORKERS: "${WAVONYX_WEBHOOK_WORKERS:-1}"
+      WAVONYX_WEBHOOK_INCLUDE_FROM_ME: "${WAVONYX_WEBHOOK_INCLUDE_FROM_ME:-false}"
+      WAVONYX_TYPING_MODE: "${WAVONYX_TYPING_MODE:-natural}"
+      WAVONYX_TYPING_PER_CHAR: "${WAVONYX_TYPING_PER_CHAR:-55ms}"
+      WAVONYX_TYPING_MIN_CPS: "${WAVONYX_TYPING_MIN_CPS:-4}"
+      WAVONYX_TYPING_MAX_CPS: "${WAVONYX_TYPING_MAX_CPS:-9}"
+      WAVONYX_TYPING_MIN_TOTAL: "${WAVONYX_TYPING_MIN_TOTAL:-400ms}"
+      WAVONYX_TYPING_MAX_TOTAL: "${WAVONYX_TYPING_MAX_TOTAL:-15s}"
+      WAVONYX_SEND_MIN_GAP: "${WAVONYX_SEND_MIN_GAP:-1s}"
+      WAVONYX_SEND_QUEUE: "${WAVONYX_SEND_QUEUE:-100}"
+      WAVONYX_RING_SIZE: "${WAVONYX_RING_SIZE:-200}"
+      WAVONYX_LOG_LEVEL: "${WAVONYX_LOG_LEVEL:-info}"
+    volumes:
+      # WhatsApp credentials live here; they MUST survive restarts or every
+      # deploy forces re-pairing.
+      - wavonyx-data:/data
+
+volumes:
+  wavonyx-data:
