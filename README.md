@@ -146,6 +146,15 @@ your scanner struggles, try `--invert` (helps on some light themes) or
 
 ### Commands
 
+**Server**
+
+| Command | What it does |
+|---|---|
+| `wavonyx serve` | Run the gateway (this is the process everything else talks to) |
+| `wavonyx healthcheck` | Probe the local server's `/health`; used as the container healthcheck |
+
+**Sessions**
+
 | Command | What it does |
 |---|---|
 | `wavonyx connect [id]` | Pair an account, showing a live QR code |
@@ -153,6 +162,11 @@ your scanner struggles, try `--invert` (helps on some light themes) or
 | `wavonyx status [id]` | Show one session in detail |
 | `wavonyx logout [id]` | Unlink the device, keep the session |
 | `wavonyx delete <id>` | Delete the session and its credentials |
+
+**Messages**
+
+| Command | What it does |
+|---|---|
 | `wavonyx send <id> <to> <text…>` | Send a text message |
 | `wavonyx send --file f.pdf <id> <to> [caption…]` | Send an attachment |
 | `wavonyx messages [id] [-n 20]` | Show recent inbound messages |
@@ -161,10 +175,17 @@ your scanner struggles, try `--invert` (helps on some light themes) or
 | `wavonyx revoke <id> <to> <msg-id>` | Delete a message you sent, for everyone |
 | `wavonyx media <id> <token> [-o file]` | Download an inbound attachment |
 
+**Help**
+
+| Command | What it does |
+|---|---|
+| `wavonyx help` | Summary of every command |
+| `wavonyx help <command>` | Help for one command (same as `wavonyx <command> -h`) |
+| `wavonyx version` | Print the version |
+
 The session id defaults to `default` where it's optional. Every client command
 accepts `--url`, `--key`, `--json`, and `--timeout`, before or after the command
-name; other flags go before the positional arguments. `wavonyx <command> -h`
-lists them.
+name; other flags go before the positional arguments.
 
 ### Everyday use
 
