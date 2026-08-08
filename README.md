@@ -82,8 +82,31 @@ The upside is that the CLI works from anywhere that can reach the server.
 | Docker on this machine | Nothing — compose publishes the port, so the default still works. |
 | Another machine | `export WAVONYX_URL=https://wa.example.com` (or pass `--url`). |
 
-Add `WAVONYX_API_KEY` (or `--key`) whenever the server has auth enabled. For a
-remote server, put it behind TLS and never expose port 9900 unprotected.
+### Authentication
+
+When the server runs with `WAVONYX_API_KEY` set, the CLI must present the same
+key. Either export it once per shell:
+
+```sh
+export WAVONYX_API_KEY=your-key
+wavonyx list
+```
+
+or pass it per command, which overrides the environment:
+
+```sh
+wavonyx --key your-key list
+```
+
+Without it you get a `401 unauthorized` and a reminder of both options.
+
+> [!NOTE]
+> `.env` is only read by `docker compose`, never by the binary itself. If you
+> keep your key there and run the server with `make run`, load it into your
+> shell first — `set -a; source .env; set +a` — which configures the server and
+> the CLI in one go.
+
+For a remote server, put it behind TLS and never expose port 9900 unprotected.
 
 You can also run it inside the container, though you rarely need to. The image
 is distroless, so there's no shell — call the binary by its full path:
