@@ -37,6 +37,8 @@ var (
 	ErrMissingMedia = errors.New("wavonyx: missing media data")
 	// ErrMediaTooLarge means an outbound media file exceeded MaxMediaBytes.
 	ErrMediaTooLarge = errors.New("wavonyx: media file too large")
+	// ErrInvalidWebhook means a webhook URL was not a usable http(s) URL.
+	ErrInvalidWebhook = errors.New("wavonyx: invalid webhook url")
 )
 
 // SendError wraps a failure to deliver an outgoing message to WhatsApp. It

@@ -104,6 +104,7 @@ func (s *session) stop() {
 }
 
 func (s *session) info() SessionInfo {
+	s.refreshPushName()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return SessionInfo{
@@ -115,6 +116,32 @@ func (s *session) info() SessionInfo {
 		WebhookURL: s.webhookURL,
 		CreatedAt:  s.createdAt,
 	}
+}
+
+// refreshPushName re-reads the account's WhatsApp display name from the client.
+// WhatsApp often delivers it after the connection is already up (and it changes
+// whenever the user renames themselves on their phone), so reading it only once
+// at connect time would leave it stale or empty.
+func (s *session) refreshPushName() {
+	s.mu.Lock()
+	client := s.client
+	s.mu.Unlock()
+	if client == nil {
+		return
+	}
+	if name := client.PushName(); name != "" {
+		s.mu.Lock()
+		s.pushName = name
+		s.mu.Unlock()
+	}
+}
+
+// setWebhookURL points this session's inbound deliveries at a new URL. An empty
+// URL falls back to the manager-wide webhook.
+func (s *session) setWebhookURL(url string) {
+	s.mu.Lock()
+	s.webhookURL = url
+	s.mu.Unlock()
 }
 
 func (s *session) currentJID() string {

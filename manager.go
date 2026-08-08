@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	rand "math/rand/v2"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,6 +29,7 @@ import (
 // SessionAPI is the surface the HTTP server depends on. *Manager implements it.
 type SessionAPI interface {
 	Create(ctx context.Context, id, webhookURL string) (*SessionInfo, error)
+	UpdateWebhook(ctx context.Context, id, webhookURL string) (*SessionInfo, error)
 	List(ctx context.Context) []SessionInfo
 	Get(ctx context.Context, id string) (*SessionInfo, error)
 	Login(ctx context.Context, id string) (*QRInfo, error)
@@ -230,6 +232,9 @@ func (m *Manager) Create(ctx context.Context, id, webhookURL string) (*SessionIn
 	} else if !sessionIDRe.MatchString(id) {
 		return nil, ErrInvalidSessionID
 	}
+	if err := validateWebhookURL(webhookURL); err != nil {
+		return nil, err
+	}
 
 	now := time.Now().UTC()
 	if err := m.reg.Create(ctx, registry.Session{ID: id, WebhookURL: webhookURL, CreatedAt: now}); err != nil {
@@ -251,6 +256,41 @@ func (m *Manager) Create(ctx context.Context, id, webhookURL string) (*SessionIn
 
 	info := s.info()
 	return &info, nil
+}
+
+// UpdateWebhook changes where this session's inbound messages are delivered,
+// without disturbing its WhatsApp connection. An empty URL clears the override
+// so the session falls back to the manager-wide webhook.
+func (m *Manager) UpdateWebhook(ctx context.Context, id, webhookURL string) (*SessionInfo, error) {
+	if err := validateWebhookURL(webhookURL); err != nil {
+		return nil, err
+	}
+	s, err := m.session(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.reg.UpdateWebhook(ctx, id, webhookURL); err != nil {
+		if errors.Is(err, registry.ErrNotFound) {
+			return nil, ErrSessionNotFound
+		}
+		return nil, err
+	}
+	s.setWebhookURL(webhookURL)
+	info := s.info()
+	return &info, nil
+}
+
+// validateWebhookURL accepts an empty string (meaning "use the global webhook")
+// or an absolute http(s) URL.
+func validateWebhookURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return ErrInvalidWebhook
+	}
+	return nil
 }
 
 func (m *Manager) Get(ctx context.Context, id string) (*SessionInfo, error) {

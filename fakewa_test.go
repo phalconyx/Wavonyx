@@ -291,6 +291,14 @@ func (c *fakeClient) fireLoggedOut() {
 	}
 }
 
+// setPushName simulates WhatsApp telling us the account's display name after
+// the connection is already up.
+func (c *fakeClient) setPushName(name string) {
+	c.mu.Lock()
+	c.pushName = name
+	c.mu.Unlock()
+}
+
 func (c *fakeClient) setGate(entered chan string, gate chan struct{}) {
 	c.mu.Lock()
 	c.sendEntered = entered

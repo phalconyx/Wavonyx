@@ -160,6 +160,7 @@ your scanner struggles, try `--invert` (helps on some light themes) or
 | `wavonyx connect [id]` | Pair an account, showing a live QR code |
 | `wavonyx list` | List sessions and their status |
 | `wavonyx status [id]` | Show one session in detail |
+| `wavonyx webhook <id> [url]` | Show or set this session's own webhook (`--clear` to unset) |
 | `wavonyx logout [id]` | Unlink the device, keep the session |
 | `wavonyx delete <id>` | Delete the session and its credentials |
 
@@ -184,8 +185,10 @@ your scanner struggles, try `--invert` (helps on some light themes) or
 | `wavonyx version` | Print the version |
 
 The session id defaults to `default` where it's optional. Every client command
-accepts `--url`, `--key`, `--json`, and `--timeout`, before or after the command
-name; other flags go before the positional arguments.
+accepts `--url`, `--key`, `--json`, and `--timeout`. Flags can go anywhere —
+`wavonyx messages personal -n 5` and `wavonyx messages -n 5 personal` are the
+same. The exceptions are `send` and `edit`, whose trailing words are the message
+text: put their flags first, as in `wavonyx send --file a.pdf personal 628…`.
 
 ### Everyday use
 
@@ -274,7 +277,26 @@ curl -s "${H[@]}" -X DELETE "localhost:9900/sessions/personal/messages/<message_
 
 ## Receiving messages
 
-Set `WAVONYX_WEBHOOK_URL` (and optionally a per‑session `webhook_url` on create).
+`WAVONYX_WEBHOOK_URL` is the default endpoint, but **each session can deliver
+somewhere of its own** — useful when one instance serves several numbers:
+
+```sh
+wavonyx webhook toko https://app.example/wh/toko
+wavonyx webhook cs   https://app.example/wh/cs
+wavonyx webhook cs --clear     # back to the global endpoint
+```
+
+Equivalently over HTTP, at creation time or later:
+
+```sh
+curl -X POST  localhost:9900/sessions -d '{"id":"toko","webhook_url":"https://app.example/wh/toko"}'
+curl -X PATCH localhost:9900/sessions/toko -d '{"webhook_url":"https://app.example/wh/toko"}'
+```
+
+Changing it takes effect immediately and does not disturb the WhatsApp
+connection. A session with no URL of its own falls back to the global one; when
+both are empty, delivery is simply off for that session (the ring buffer still
+works).
 Each inbound message is POSTed as:
 
 ```json
@@ -351,6 +373,7 @@ curl -s "${H[@]}" "localhost:9900/sessions/personal/messages?limit=20"
 | `POST /sessions` | Create a session. Body: `{"id"?, "webhook_url"?}` (auto id if omitted). |
 | `GET /sessions` | List sessions. |
 | `GET /sessions/{id}` | Session status (`created`\|`pairing`\|`connected`\|`disconnected`\|`logged_out`). |
+| `PATCH /sessions/{id}` | Update the session. Body: `{"webhook_url":"…"}` (`""` clears it). |
 | `POST /sessions/{id}/login` | Start pairing; returns the first QR code. |
 | `GET /sessions/{id}/qr` | Latest rotating QR code. |
 | `POST /sessions/{id}/logout` | Unlink the device (keeps the session row). |
@@ -365,11 +388,11 @@ Every response uses the envelope `{"data": ...}` or
 `{"error": {"code", "message"}}` with `{"meta": {"request_id"}}`; the HTTP status
 is authoritative. Stable error codes include `unauthorized`, `invalid_json`,
 `invalid_session_id`, `missing_text`, `invalid_recipient`, `invalid_typing`,
-`invalid_limit`, `invalid_token`, `invalid_multipart`, `missing_file`,
-`missing_media`, `session_not_found`, `qr_not_available`, `session_exists`,
-`already_connected`, `not_connected`, `not_logged_in`, `queue_full`,
-`media_too_large`, `send_failed`, `media_download_failed`, `unknown_route`,
-`internal`.
+`invalid_limit`, `invalid_token`, `invalid_multipart`, `invalid_webhook`,
+`missing_file`, `missing_media`, `missing_webhook_url`, `session_not_found`,
+`qr_not_available`, `session_exists`, `already_connected`, `not_connected`,
+`not_logged_in`, `queue_full`, `media_too_large`, `send_failed`,
+`media_download_failed`, `unknown_route`, `internal`.
 
 ## Configuration
 

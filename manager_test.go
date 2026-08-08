@@ -17,12 +17,22 @@ import (
 type fakeSink struct {
 	mu     sync.Mutex
 	events []Event
+	dests  []string // the per-session URL each event was routed to
 }
 
 func (f *fakeSink) Enqueue(url string, ev Event) {
 	f.mu.Lock()
 	f.events = append(f.events, ev)
+	f.dests = append(f.dests, url)
 	f.mu.Unlock()
+}
+
+func (f *fakeSink) urls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.dests))
+	copy(out, f.dests)
+	return out
 }
 func (f *fakeSink) Close() {}
 func (f *fakeSink) all() []Event {

@@ -25,6 +25,7 @@ type fakeAPI struct {
 	media  *wavonyx.MediaContent
 
 	createErr   error
+	patchErr    error
 	getErr      error
 	loginErr    error
 	qrErr       error
@@ -36,6 +37,8 @@ type fakeAPI struct {
 
 	lastCreateID   string
 	lastCreateHook string
+	lastPatchID    string
+	lastPatchHook  string
 	lastSendID     string
 	lastSendReq    wavonyx.SendRequest
 	lastMediaReq   wavonyx.MediaSendRequest
@@ -52,6 +55,13 @@ func (f *fakeAPI) Create(ctx context.Context, id, webhookURL string) (*wavonyx.S
 	f.lastCreateID, f.lastCreateHook = id, webhookURL
 	if f.createErr != nil {
 		return nil, f.createErr
+	}
+	return f.info, nil
+}
+func (f *fakeAPI) UpdateWebhook(ctx context.Context, id, webhookURL string) (*wavonyx.SessionInfo, error) {
+	f.lastPatchID, f.lastPatchHook = id, webhookURL
+	if f.patchErr != nil {
+		return nil, f.patchErr
 	}
 	return f.info, nil
 }
@@ -200,6 +210,41 @@ func TestCreateSession(t *testing.T) {
 		t.Fatalf("data: %v", env)
 	}
 	requireRequestID(t, res, env)
+}
+
+func TestUpdateSessionWebhook(t *testing.T) {
+	f := &fakeAPI{info: &wavonyx.SessionInfo{ID: "toko", WebhookURL: "https://app.example/wh/toko"}}
+	h := New(f, Config{})
+
+	res, env := do(t, h, "PATCH", "/sessions/toko", "", `{"webhook_url":"https://app.example/wh/toko"}`)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d env=%v", res.StatusCode, env)
+	}
+	if f.lastPatchID != "toko" || f.lastPatchHook != "https://app.example/wh/toko" {
+		t.Fatalf("patch args: id=%q hook=%q", f.lastPatchID, f.lastPatchHook)
+	}
+	if dataObj(t, env)["webhook_url"] != "https://app.example/wh/toko" {
+		t.Fatalf("data: %v", env)
+	}
+
+	// An explicit empty string clears the override.
+	if res, _ := do(t, h, "PATCH", "/sessions/toko", "", `{"webhook_url":""}`); res.StatusCode != http.StatusOK {
+		t.Fatalf("clear: status=%d", res.StatusCode)
+	}
+	if f.lastPatchHook != "" {
+		t.Fatalf("clear should send an empty url, got %q", f.lastPatchHook)
+	}
+
+	// Omitting the field is rejected rather than silently doing nothing.
+	if res, env := do(t, h, "PATCH", "/sessions/toko", "", `{}`); res.StatusCode != http.StatusBadRequest || errCode(t, env) != "missing_webhook_url" {
+		t.Fatalf("omitted field: status=%d env=%v", res.StatusCode, env)
+	}
+
+	// A malformed URL surfaces as invalid_webhook.
+	h2 := New(&fakeAPI{patchErr: wavonyx.ErrInvalidWebhook}, Config{})
+	if res, env := do(t, h2, "PATCH", "/sessions/toko", "", `{"webhook_url":"nope"}`); res.StatusCode != http.StatusBadRequest || errCode(t, env) != "invalid_webhook" {
+		t.Fatalf("bad url: status=%d env=%v", res.StatusCode, env)
+	}
 }
 
 func TestSendMessage(t *testing.T) {

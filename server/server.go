@@ -70,6 +70,7 @@ func New(api wavonyx.SessionAPI, cfg Config) http.Handler {
 	mux.HandleFunc("POST /sessions", h.createSession)
 	mux.HandleFunc("GET /sessions", h.listSessions)
 	mux.HandleFunc("GET /sessions/{id}", h.getSession)
+	mux.HandleFunc("PATCH /sessions/{id}", h.updateSession)
 	mux.HandleFunc("POST /sessions/{id}/login", h.login)
 	mux.HandleFunc("GET /sessions/{id}/qr", h.qr)
 	mux.HandleFunc("POST /sessions/{id}/logout", h.logout)
@@ -138,6 +139,31 @@ func (h *handler) getSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info, err := h.api.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeAPIError(w, r, err)
+		return
+	}
+	writeData(w, r, http.StatusOK, info)
+}
+
+// updateSession changes a session's settings in place. Only webhook_url is
+// settable today; sending "" clears it so the session falls back to the global
+// webhook. The WhatsApp connection is left untouched.
+func (h *handler) updateSession(w http.ResponseWriter, r *http.Request) {
+	if !h.auth(w, r) {
+		return
+	}
+	var body struct {
+		WebhookURL *string `json:"webhook_url"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.WebhookURL == nil {
+		writeError(w, r, http.StatusBadRequest, "missing_webhook_url", "body must set \"webhook_url\" (use \"\" to clear it)")
+		return
+	}
+	info, err := h.api.UpdateWebhook(r.Context(), r.PathValue("id"), *body.WebhookURL)
 	if err != nil {
 		writeAPIError(w, r, err)
 		return
@@ -438,6 +464,8 @@ func classify(err error) (int, string) {
 		return http.StatusBadRequest, "invalid_token"
 	case errors.Is(err, wavonyx.ErrMissingMedia):
 		return http.StatusBadRequest, "missing_media"
+	case errors.Is(err, wavonyx.ErrInvalidWebhook):
+		return http.StatusBadRequest, "invalid_webhook"
 	case errors.Is(err, wavonyx.ErrMediaTooLarge):
 		return http.StatusRequestEntityTooLarge, "media_too_large"
 	case errors.Is(err, wavonyx.ErrSessionNotFound):

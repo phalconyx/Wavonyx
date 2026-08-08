@@ -410,6 +410,101 @@ func TestRevokeEvent(t *testing.T) {
 	}
 }
 
+func TestUpdateWebhookPerSession(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	store.script = pairScript("C")
+	store.pairJID = "628000@s.whatsapp.net"
+	m, sink := newTestManagerSink(t, store, Config{})
+
+	// Two sessions, each pointing somewhere different.
+	if _, err := m.Create(ctx, "toko", "https://app.example/wh/toko"); err != nil {
+		t.Fatalf("create toko: %v", err)
+	}
+	if _, err := m.Create(ctx, "cs", ""); err != nil {
+		t.Fatalf("create cs: %v", err)
+	}
+
+	info, err := m.UpdateWebhook(ctx, "cs", "https://app.example/wh/cs")
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if info.WebhookURL != "https://app.example/wh/cs" {
+		t.Fatalf("info: %+v", info)
+	}
+	// The change must survive a manager restart, i.e. be persisted.
+	if got, _ := m.Get(ctx, "cs"); got.WebhookURL != "https://app.example/wh/cs" {
+		t.Fatalf("not applied to the live session: %+v", got)
+	}
+
+	// An inbound message on that session must go to its own URL.
+	if _, err := m.Login(ctx, "cs"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	waitStatus(t, m, "cs", StatusConnected, 2*time.Second)
+	store.client().fireMessage(InboundMessage{MessageID: "M1", Chat: "628999888777@s.whatsapp.net", Text: "hi"})
+
+	waitUntil(t, func() bool { return len(sink.all()) > 0 }, 2*time.Second)
+	if got := sink.urls(); len(got) != 1 || got[0] != "https://app.example/wh/cs" {
+		t.Fatalf("delivered to %v", got)
+	}
+
+	// Clearing falls back to the global webhook (empty URL at the dispatcher).
+	if info, err = m.UpdateWebhook(ctx, "cs", ""); err != nil || info.WebhookURL != "" {
+		t.Fatalf("clear: info=%+v err=%v", info, err)
+	}
+}
+
+func TestUpdateWebhookValidation(t *testing.T) {
+	ctx := context.Background()
+	m, _ := newTestManager(t, newFakeStore(), Config{})
+	create(t, m, "personal")
+
+	for _, bad := range []string{"not-a-url", "ftp://x/y", "https://"} {
+		if _, err := m.UpdateWebhook(ctx, "personal", bad); !errors.Is(err, ErrInvalidWebhook) {
+			t.Fatalf("%q: want ErrInvalidWebhook, got %v", bad, err)
+		}
+	}
+	if _, err := m.UpdateWebhook(ctx, "missing", "https://x/y"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("unknown session: %v", err)
+	}
+	// Create validates too.
+	if _, err := m.Create(ctx, "bad", "not-a-url"); !errors.Is(err, ErrInvalidWebhook) {
+		t.Fatalf("create with bad url: %v", err)
+	}
+}
+
+func TestPushNameRefreshesAfterConnect(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	store.script = pairScript("C")
+	store.pairJID = "628000@s.whatsapp.net"
+	store.pairPush = "" // WhatsApp has not told us the name yet at connect time
+	m, _ := newTestManager(t, store, Config{})
+
+	create(t, m, "personal")
+	if _, err := m.Login(ctx, "personal"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	waitStatus(t, m, "personal", StatusConnected, 2*time.Second)
+
+	if info, _ := m.Get(ctx, "personal"); info.PushName != "" {
+		t.Fatalf("push name should still be unknown: %q", info.PushName)
+	}
+
+	// It arrives later, as it does in practice via app-state sync.
+	store.client().setPushName("Phalconyx")
+	if info, _ := m.Get(ctx, "personal"); info.PushName != "Phalconyx" {
+		t.Fatalf("push name not picked up: %q", info.PushName)
+	}
+
+	// A rename on the phone is reflected too.
+	store.client().setPushName("Phalconyx Store")
+	if info, _ := m.Get(ctx, "personal"); info.PushName != "Phalconyx Store" {
+		t.Fatalf("rename not picked up: %q", info.PushName)
+	}
+}
+
 func TestEditMessageSend(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeStore()
