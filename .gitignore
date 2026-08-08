@@ -1,7 +1,8 @@
-# Binaries
+# Binaries. Anchor these to the repo root: an unanchored "wavonyx" would also
+# match the cmd/wavonyx source directory and quietly keep the CLI out of git.
 bin/
-wavonyx
-wavonyx-*
+/wavonyx
+/wavonyx-*
 *.exe
 
 # Go
