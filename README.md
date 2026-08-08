@@ -18,7 +18,8 @@ with simulated typing to look less like a bot.
 ## Features
 
 - **Multi‑session** — one instance manages many WhatsApp numbers, addressed as `/sessions/{id}`.
-- **QR login** — the pairing code string is returned in the API response for your client to render; a rotating‑code endpoint keeps pairing alive.
+- **QR login** — the pairing code is returned by the API for your client to render, and `wavonyx connect` draws a scannable QR right in your terminal.
+- **Built‑in CLI** — pair, list, send, and tail messages from the shell, against a local or remote server.
 - **Send** text or media (image/video/audio/document) with **simulated typing** — `off`, fixed `constant`, or humanlike `natural` delay, configurable globally and per request; sends are serialized per session with a minimum gap.
 - **Receive** — inbound messages (text and media) are parsed (sender, chat, group/DM, push name, caption, quoted) and delivered via **HMAC‑signed webhooks** with retries, plus kept in an in‑memory **ring buffer**; media bytes are fetched on demand with a token.
 - **Lightweight & static** — pure Go, `CGO_ENABLED=0`, runs on a distroless image; WhatsApp credentials persist in a local SQLite file (pure‑Go [modernc](https://pkg.go.dev/modernc.org/sqlite) driver).
@@ -26,14 +27,17 @@ with simulated typing to look less like a bot.
 ## How it works
 
 ```
-cmd/wavonyx (serve)  ->  server/ (HTTP)  ->  Manager (sessions)  ->  whatsmeow
-                              envelope/auth        |                    (WebSocket + E2E)
-                                                   +-> SQLite (creds + session registry)
-                                                   +-> webhook dispatcher (inbound)
+  your app  ─┐
+             ├─HTTP→  server/  →  Manager (sessions)  →  whatsmeow
+  wavonyx   ─┘        envelope        |                  (WebSocket + E2E)
+  CLI                 + auth          ├→ SQLite (creds + session registry)
+                                      └→ webhook dispatcher (inbound)
 ```
 
-Only WhatsApp credentials and a tiny session registry are persisted. Inbound
-messages are ephemeral (webhook + ring buffer), never written to disk.
+`wavonyx serve` owns the WhatsApp connections; everything else — your app and
+the CLI alike — talks to it over HTTP. Only WhatsApp credentials and a tiny
+session registry are persisted; inbound messages are ephemeral (webhook + ring
+buffer), never written to disk.
 
 ## Quickstart
 
@@ -59,7 +63,117 @@ curl -s localhost:9900/health
 
 If `WAVONYX_API_KEY` is set, send it as `X-API-Key` on every request except `/health`.
 
-## Pair a number and send a message
+## Command line
+
+The same `wavonyx` binary is both the server and its client. `wavonyx serve`
+runs the gateway; every other command is a thin HTTP client for a **running**
+server.
+
+That split is deliberate: a WhatsApp session is a long‑lived WebSocket
+connection, so a one‑shot command can't hold one, and two processes sharing the
+same device store would fight over it (WhatsApp drops one with `StreamReplaced`).
+The upside is that the CLI works from anywhere that can reach the server.
+
+### Pointing the CLI at a server
+
+| Where the server runs | What to do |
+|---|---|
+| Same machine, default port | Nothing — the CLI defaults to `http://127.0.0.1:9900`. |
+| Docker on this machine | Nothing — compose publishes the port, so the default still works. |
+| Another machine | `export WAVONYX_URL=https://wa.example.com` (or pass `--url`). |
+
+Add `WAVONYX_API_KEY` (or `--key`) whenever the server has auth enabled. For a
+remote server, put it behind TLS and never expose port 9900 unprotected.
+
+You can also run it inside the container, though you rarely need to. The image
+is distroless, so there's no shell — call the binary by its full path:
+
+```sh
+docker compose exec wavonyx /usr/local/bin/wavonyx list
+```
+
+### Pairing a phone
+
+```sh
+wavonyx connect personal
+```
+
+This creates the session if needed, then draws the QR code in your terminal and
+keeps it fresh as WhatsApp rotates it:
+
+```
+Session "personal" — scan this with WhatsApp on your phone:
+  WhatsApp › Settings › Linked Devices › Link a Device
+
+    █▀▀▀▀▀█ ▄▀ ▄█▀▄ █▀▀▀▀▀█
+    █ ███ █ ▀█▄▀▄▄█ █ ███ █        (a real, scannable QR code)
+    █▄▄▄▄▄█ ▀ ▄▀▄ ▀ █▄▄▄▄▄█
+    …
+
+Waiting for the scan… the code refreshes by itself. Press Ctrl-C to cancel.
+```
+
+Scan it, and the line is replaced by `✓ Session "personal" connected as … `.
+The session then lives on in the server — the command exiting doesn't disconnect
+it, and it reconnects by itself after a server restart.
+
+Your terminal needs to be ~70 columns wide for the code to render intact. If
+your scanner struggles, try `--invert` (helps on some light themes) or
+`--no-color`.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `wavonyx connect [id]` | Pair an account, showing a live QR code |
+| `wavonyx list` | List sessions and their status |
+| `wavonyx status [id]` | Show one session in detail |
+| `wavonyx logout [id]` | Unlink the device, keep the session |
+| `wavonyx delete <id>` | Delete the session and its credentials |
+| `wavonyx send <id> <to> <text…>` | Send a text message |
+| `wavonyx send --file f.pdf <id> <to> [caption…]` | Send an attachment |
+| `wavonyx messages [id] [-n 20]` | Show recent inbound messages |
+| `wavonyx watch [id]` | Print inbound messages as they arrive |
+| `wavonyx edit <id> <to> <msg-id> <text…>` | Edit a message you sent |
+| `wavonyx revoke <id> <to> <msg-id>` | Delete a message you sent, for everyone |
+| `wavonyx media <id> <token> [-o file]` | Download an inbound attachment |
+
+The session id defaults to `default` where it's optional. Every client command
+accepts `--url`, `--key`, `--json`, and `--timeout`, before or after the command
+name; other flags go before the positional arguments. `wavonyx <command> -h`
+lists them.
+
+### Everyday use
+
+```sh
+wavonyx list
+# ID        STATUS     PHONE          NAME       CREATED
+# personal  connected  6281234567890  Phalconyx  2026-07-24 13:04
+
+wavonyx send personal 6281234567890 hello from my terminal
+wavonyx send --file invoice.pdf personal 6281234567890 your invoice is ready
+
+wavonyx watch personal
+# 13:07:12  Alex (628999…)          hey, got it
+# 13:07:40  Alex (628999…)          [image] here's the photo
+
+wavonyx messages personal -n 5
+```
+
+For scripting, `--json` prints the raw payload — handy with `jq`:
+
+```sh
+wavonyx list --json | jq -r '.[] | select(.status=="connected") | .id'
+
+# download the newest attachment
+TOKEN=$(wavonyx messages personal --json | jq -r '[.[] | select(.media)][0].media.token')
+wavonyx media personal "$TOKEN" -o attachment
+```
+
+## HTTP API walkthrough
+
+The CLI covers the same ground, but here is the raw API if you're integrating
+from another language.
 
 ```sh
 KEY="your-api-key"                       # omit the header if auth is disabled
@@ -259,16 +373,16 @@ wavonyx/            core library: manager, session, typing, webhook, wa adapter,
   typing/           pure typing-delay calculator
   server/           HTTP handlers (envelope, auth, error mapping)
   internal/registry SQLite session registry
-  cmd/wavonyx/      CLI: serve | healthcheck | version | help
+  cmd/wavonyx/      server + CLI (client.go, cmd_session.go, cmd_message.go, qr.go)
   examples/basic/   library usage example
 ```
 
 ## Roadmap
 
-- Media send (image/document/audio) and inbound media download.
 - Phone‑number pairing‑code login (QR alternative).
-- `session.status` webhook events; read receipts; group tooling.
+- `session.status` webhook events; group tooling.
 - Optional persistent message store behind the same ring API.
+- Streaming inbound events (SSE/WebSocket) so `watch` doesn't poll.
 
 ## License
 
